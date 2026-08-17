@@ -5,6 +5,7 @@ A cross-platform extension that automatically denies all cookie consent banners.
 ## Features
 
 - Automatically clicks "deny", "reject", or "only necessary" buttons on cookie popups
+- Opens "Manage cookies" / preferences panels and saves the selection only once every optional toggle is verified off, for sites with no direct reject button
 - Supports major consent management platforms: OneTrust, Cookiebot, Quantcast, Didomi, Klaro, Osano, Complianz, Iubenda, and more
 - Multilingual support: English, German, French, Spanish, Italian, Dutch, Portuguese, Polish, and Swedish
 - Watches for late-loading banners using a MutationObserver
@@ -79,11 +80,12 @@ Requires Xcode 14+ on macOS and an iOS 15+ or iPadOS 15+ device.
 
 ## How It Works
 
-The content script uses a three-tier detection strategy:
+The content script uses a four-tier detection strategy:
 
 1. **Known selectors** — Matches deny/reject buttons from popular consent platforms using platform-specific CSS selectors
 2. **Banner search** — Locates cookie banner containers on the page and scans for deny/reject buttons inside them
-3. **Broad search** — Falls back to scanning all interactive elements, scoring them by relevance to cookie consent context
+3. **Broad search** — Falls back to scanning all interactive elements, scoring them by relevance to cookie consent context (via container attributes and, as a fallback, nearby visible text) so it stays robust on sites with obfuscated/hashed CSS class names
+4. **Preferences panel** — When no direct reject option is found, opens a "Manage cookies" / "Cookie settings" panel (if present) and saves the selection only once every optional toggle is verified off
 
 If the banner hasn't appeared yet, the script retries periodically and also observes DOM mutations to catch dynamically injected banners.
 

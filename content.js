@@ -15,10 +15,11 @@
     /\brefuse\s*(all)?\s*(cookies)?\b/i,
     /\bno\s*,?\s*thanks\b/i,
     /\bonly\s*necessary\b/i,
-    /\bnecessary\s*only\b/i,
-    /\bonly\s*essential\b/i,
-    /\bessential\s*only\b/i,
+    /\bnecessary\s*(?:cookies?\s*)?only\b/i,
+    /\bonly\s*essentials?\b/i,
+    /\bessentials?\s*only\b/i,
     /\bonly\s*required\b/i,
+    /\b(?:agree|accept|allow|continue)\s+(?:to\s+|with\s+)?(?:the\s+)?(?:only\s+)?(?:necessary|essentials?)\b/i,
     /\bdo\s*not\s*(allow|accept|consent)\b/i,
     /\bopt[\s-]*out\b/i,
     /\bi\s*do\s*not\s*agree\b/i,
@@ -147,6 +148,7 @@
 
   let handled = false;
   let attempts = 0;
+  let panelTriggerClicked = false;
   const MAX_ATTEMPTS = 15;
   const RETRY_INTERVAL_MS = 800;
 
@@ -180,8 +182,35 @@
     return (el.textContent || el.value || el.getAttribute("aria-label") || "").trim();
   }
 
+  function matchesAnyPattern(text, patterns) {
+    return patterns.some((pattern) => pattern.test(text));
+  }
+
   function matchesDenyPattern(text) {
-    return DENY_BUTTON_PATTERNS.some((pattern) => pattern.test(text));
+    return matchesAnyPattern(text, DENY_BUTTON_PATTERNS);
+  }
+
+  // Fallback context signal for tryBroadSearch(): sites using hashed/obfuscated CSS class
+  // names (CSS Modules, styled-components) carry no "cookie"/"consent" substring in their
+  // class/id attributes, but real banners almost always mention it in nearby visible text.
+  // Bounded by depth and length so we don't award context credit once we've walked past the
+  // actual banner into general page chrome.
+  const CONTEXT_TEXT_PATTERN = /cookie|consent|gdpr|privacy\s*(policy|settings|preferences)|tracking\s*preferences/i;
+  const CONTEXT_SEARCH_MAX_DEPTH = 6;
+  const CONTEXT_TEXT_MAX_LENGTH = 800;
+
+  function hasNearbyCookieContextText(el) {
+    let node = el.parentElement;
+    let depth = 0;
+    while (node && depth < CONTEXT_SEARCH_MAX_DEPTH) {
+      const text = (node.textContent || "").trim();
+      if (text.length > 0 && text.length <= CONTEXT_TEXT_MAX_LENGTH && CONTEXT_TEXT_PATTERN.test(text)) {
+        return true;
+      }
+      node = node.parentElement;
+      depth++;
+    }
+    return false;
   }
 
   // Try known deny button selectors first (fast path)
@@ -241,10 +270,12 @@
 
       // Score based on relevance — prefer elements that look like they are in a cookie context
       let score = 1;
-      const parentText = (el.closest('[class*="cookie" i], [class*="consent" i], [id*="cookie" i], [id*="consent" i]') != null)
-        ? 10
-        : 0;
-      score += parentText;
+      const hasAttrContext = el.closest('[class*="cookie" i], [class*="consent" i], [id*="cookie" i], [id*="consent" i]') != null;
+      if (hasAttrContext) {
+        score += 10;
+      } else if (hasNearbyCookieContextText(el)) {
+        score += 6; // weaker signal than an explicit class/id match, but still clears MIN_BROAD_SEARCH_SCORE
+      }
 
       if (isClickable(el)) score += 2;
       if (text.length < 30) score += 1; // Prefer concise button labels
@@ -266,10 +297,103 @@
     return true;
   }
 
+  // Some banners offer no direct reject option — only "Accept all" and a "Manage
+  // cookies"/"Cookie settings" trigger that opens a panel with optional-category toggles
+  // (already off by default, per GDPR) and a "Save settings" style confirm button.
+  const PANEL_TRIGGER_PATTERNS = [
+    /\bmanage\s*cookies?\b/i,
+    /\bcookie\s*settings\b/i,
+    /\bmanage\s*preferences\b/i,
+    /\bmanage\s*consent\b/i,
+    /\bcustomi[sz]e\b/i,
+    /\bprivacy\s*settings\b/i,
+  ];
+
+  const PANEL_CONFIRM_PATTERNS = [
+    /\bsave\s*(settings|preferences|choices)?\b/i,
+    /\bconfirm\s*(choices|selection|settings)?\b/i,
+    /\bapply\s*(settings|preferences)?\b/i,
+  ];
+
+  // Never confirm a panel unless every optional toggle is verifiably off — disabled toggles
+  // are skipped since those are commonly the locked-on "necessary" category.
+  function panelTogglesAreAllOff(panel) {
+    const toggles = panel.querySelectorAll('input[type="checkbox"], input[type="radio"], [role="switch"]');
+    for (const toggle of toggles) {
+      if (toggle.disabled) continue;
+      const isOn = toggle.checked === true || toggle.getAttribute("aria-checked") === "true";
+      if (isOn) return false;
+    }
+    return true;
+  }
+
+  function findOpenPreferencesPanel() {
+    const candidates = document.querySelectorAll(
+      '[role="dialog"], [class*="cookie" i], [class*="consent" i], [id*="cookie" i], [id*="consent" i], [class*="privacy" i], [class*="preference" i]'
+    );
+    for (const el of candidates) {
+      if (!isVisible(el)) continue;
+      const hasToggle = el.querySelector('input[type="checkbox"], input[type="radio"], [role="switch"]');
+      if (!hasToggle) continue;
+      const hasConfirmBtn = Array.from(el.querySelectorAll('button, a, [role="button"]')).some(
+        (btn) => isVisible(btn) && matchesAnyPattern(getVisibleText(btn), PANEL_CONFIRM_PATTERNS)
+      );
+      if (hasConfirmBtn) return el;
+    }
+    return null;
+  }
+
+  function isLikelyPageNavigation(el) {
+    if (el.tagName.toLowerCase() !== "a") return false;
+    const href = el.getAttribute("href");
+    return !!href && href !== "#" && !href.startsWith("javascript:");
+  }
+
+  function tryPreferencesPanel() {
+    const panel = findOpenPreferencesPanel();
+    if (panel) {
+      if (!panelTogglesAreAllOff(panel)) return false;
+      const confirmBtn = Array.from(panel.querySelectorAll('button, a, [role="button"]')).find(
+        (btn) => isVisible(btn) && matchesAnyPattern(getVisibleText(btn), PANEL_CONFIRM_PATTERNS)
+      );
+      if (confirmBtn) {
+        confirmBtn.click();
+        notifyBackground("preferences-panel");
+        return true;
+      }
+      return false;
+    }
+
+    if (!panelTriggerClicked) {
+      // Scope the trigger search to known banner containers, not the whole document, to avoid
+      // clicking an unrelated "manage cookies" link elsewhere on the page.
+      for (const selector of BANNER_SELECTORS) {
+        try {
+          const banner = document.querySelector(selector);
+          if (!banner || !isVisible(banner)) continue;
+          const clickables = banner.querySelectorAll('button, a, [role="button"], [class*="btn"]');
+          for (const el of clickables) {
+            if (!isVisible(el) || isLikelyPageNavigation(el)) continue;
+            const text = getVisibleText(el);
+            if (text && matchesAnyPattern(text, PANEL_TRIGGER_PATTERNS)) {
+              el.click();
+              panelTriggerClicked = true;
+              return false; // not handled yet — retry/mutation loop will pick up the revealed panel
+            }
+          }
+        } catch (_) {
+          // Continue to next selector
+        }
+      }
+    }
+
+    return false;
+  }
+
   function dismissCookies() {
     if (handled) return;
 
-    if (tryKnownSelectors() || tryBannerSearch() || tryBroadSearch()) {
+    if (tryKnownSelectors() || tryBannerSearch() || tryBroadSearch() || tryPreferencesPanel()) {
       handled = true;
       return;
     }

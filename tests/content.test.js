@@ -233,6 +233,9 @@ describe("Banner search (text-pattern fallback)", () => {
     ["No, thanks"],
     ["Only necessary"],
     ["Only essential"],
+    ["Continue with necessary cookies only"],
+    ["Accept Essentials Only"],
+    ["Agree to necessary"],
     ["Do not accept"],
     ["Opt out"],
     ["I do not agree"],
@@ -292,6 +295,30 @@ describe("Banner search (text-pattern fallback)", () => {
     expect(clickSpy).not.toHaveBeenCalled();
     expect(mock.runtime.sendMessage).not.toHaveBeenCalled();
   });
+
+  test.each([["Agree to all"], ["Accept all non-necessary cookies"]])(
+    'does not treat "%s" as a deny action (guards the generic necessary/essential pattern)',
+    async (text) => {
+      const mock = makeBrowserMock();
+      global.browser = mock;
+
+      const banner = document.createElement("div");
+      banner.id = "cookie-banner";
+      makeVisible(banner);
+
+      const acceptBtn = document.createElement("button");
+      acceptBtn.textContent = text;
+      makeVisible(acceptBtn);
+      banner.appendChild(acceptBtn);
+      document.body.appendChild(banner);
+      const clickSpy = jest.spyOn(acceptBtn, "click");
+
+      await runScript(mock);
+
+      expect(clickSpy).not.toHaveBeenCalled();
+      expect(mock.runtime.sendMessage).not.toHaveBeenCalled();
+    }
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -337,10 +364,205 @@ describe("Broad search (scored fallback)", () => {
 
     expect(clickSpy).not.toHaveBeenCalled();
   });
+
+  test("clicks a high-signal deny button when the ancestor has a hashed class name but nearby text mentions cookies", async () => {
+    const mock = makeBrowserMock();
+    global.browser = mock;
+
+    // Simulates CSS Modules / styled-components hashed class names — no "cookie"/"consent"
+    // substring anywhere in class/id attributes, only in the visible copy.
+    const wrapper = document.createElement("div");
+    wrapper.className = "a1b2c3";
+
+    const copy = document.createElement("p");
+    copy.textContent = "We use cookies to improve your experience.";
+    wrapper.appendChild(copy);
+
+    const btn = document.createElement("button");
+    btn.textContent = "REJECT ALL";
+    makeVisible(btn);
+    wrapper.appendChild(btn);
+    document.body.appendChild(wrapper);
+    const clickSpy = jest.spyOn(btn, "click");
+
+    await runScript(mock);
+
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(mock.runtime.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ method: "broad-search" })
+    );
+  });
+
+  test("does NOT award context credit from oversized ancestor text (stays capped at score 4)", async () => {
+    const mock = makeBrowserMock();
+    global.browser = mock;
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "a1b2c3";
+
+    // Mentions "cookie" but is far longer than CONTEXT_TEXT_MAX_LENGTH (800 chars), so it
+    // should not count as nearby context — otherwise any long legal boilerplate elsewhere on
+    // the page could turn an unrelated "Reject All" button into a false positive.
+    const copy = document.createElement("p");
+    copy.textContent = "cookie ".repeat(200);
+    wrapper.appendChild(copy);
+
+    const btn = document.createElement("button");
+    btn.textContent = "Reject All";
+    makeVisible(btn);
+    wrapper.appendChild(btn);
+    document.body.appendChild(wrapper);
+    const clickSpy = jest.spyOn(btn, "click");
+
+    await runScript(mock);
+
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
-// 5. Retry behaviour
+// 5. Preferences panel flow (manage cookies → confirm)
+// ---------------------------------------------------------------------------
+
+describe("Preferences panel flow (manage cookies → confirm)", () => {
+  /** Builds a "manage preferences" panel with a locked necessary toggle, one optional
+   * toggle, and a Save button — mirrors the "Manage cookie settings" screenshot case. */
+  function buildPanel({ optionalChecked = false } = {}) {
+    const panel = document.createElement("div");
+    panel.className = "cookie-consent-panel";
+    makeVisible(panel);
+
+    const necessaryToggle = document.createElement("input");
+    necessaryToggle.type = "checkbox";
+    necessaryToggle.checked = true;
+    necessaryToggle.disabled = true;
+    panel.appendChild(necessaryToggle);
+
+    const optionalToggle = document.createElement("input");
+    optionalToggle.type = "checkbox";
+    optionalToggle.checked = optionalChecked;
+    panel.appendChild(optionalToggle);
+
+    const saveBtn = document.createElement("button");
+    saveBtn.textContent = "Save settings";
+    makeVisible(saveBtn);
+    panel.appendChild(saveBtn);
+
+    return { panel, saveBtn };
+  }
+
+  function buildBannerWithTrigger(onTriggerClick) {
+    const banner = document.createElement("div");
+    banner.id = "cookie-banner";
+    makeVisible(banner);
+
+    const acceptBtn = document.createElement("button");
+    acceptBtn.textContent = "Accept all";
+    makeVisible(acceptBtn);
+    banner.appendChild(acceptBtn);
+
+    const manageBtn = document.createElement("button");
+    manageBtn.textContent = "Manage cookies";
+    makeVisible(manageBtn);
+    if (onTriggerClick) manageBtn.addEventListener("click", onTriggerClick);
+    banner.appendChild(manageBtn);
+
+    document.body.appendChild(banner);
+    return { banner, manageBtn };
+  }
+
+  test("clicks the Manage cookies trigger when no direct reject option exists", async () => {
+    const mock = makeBrowserMock();
+    global.browser = mock;
+
+    const { manageBtn } = buildBannerWithTrigger();
+    const clickSpy = jest.spyOn(manageBtn, "click");
+
+    await runScript(mock);
+
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(mock.runtime.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test("clicks Save settings and reports preferences-panel when every optional toggle is off", async () => {
+    const mock = makeBrowserMock();
+    global.browser = mock;
+
+    const { panel, saveBtn } = buildPanel({ optionalChecked: false });
+    const { manageBtn } = buildBannerWithTrigger(() => document.body.appendChild(panel));
+    jest.spyOn(manageBtn, "click");
+    const saveSpy = jest.spyOn(saveBtn, "click");
+
+    await runScript(mock);
+    jest.advanceTimersByTime(800);
+    await Promise.resolve();
+
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+    expect(mock.runtime.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "cookie-denied", method: "preferences-panel" })
+    );
+  });
+
+  test("does NOT click Save settings when an optional toggle is already checked", async () => {
+    const mock = makeBrowserMock();
+    global.browser = mock;
+
+    const { panel, saveBtn } = buildPanel({ optionalChecked: true });
+    buildBannerWithTrigger(() => document.body.appendChild(panel));
+    const saveSpy = jest.spyOn(saveBtn, "click");
+
+    await runScript(mock);
+    jest.advanceTimersByTime(800);
+    await Promise.resolve();
+    jest.advanceTimersByTime(800);
+    await Promise.resolve();
+
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(mock.runtime.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test("clicks the trigger at most once across multiple retry ticks", async () => {
+    const mock = makeBrowserMock();
+    global.browser = mock;
+
+    const { manageBtn } = buildBannerWithTrigger();
+    const clickSpy = jest.spyOn(manageBtn, "click");
+
+    await runScript(mock);
+    jest.advanceTimersByTime(800);
+    await Promise.resolve();
+    jest.advanceTimersByTime(800);
+    await Promise.resolve();
+    jest.advanceTimersByTime(800);
+    await Promise.resolve();
+
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not click a Manage cookies link that is a real page navigation", async () => {
+    const mock = makeBrowserMock();
+    global.browser = mock;
+
+    const banner = document.createElement("div");
+    banner.id = "cookie-banner";
+    makeVisible(banner);
+
+    const link = document.createElement("a");
+    link.setAttribute("href", "/privacy-settings");
+    link.textContent = "Manage cookies";
+    makeVisible(link);
+    banner.appendChild(link);
+    document.body.appendChild(banner);
+    const clickSpy = jest.spyOn(link, "click");
+
+    await runScript(mock);
+
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Retry behaviour
 // ---------------------------------------------------------------------------
 
 describe("Retry behaviour", () => {
