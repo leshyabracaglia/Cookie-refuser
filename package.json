@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "test": "jest",
-    "build:chrome": "zip -r cookie-refuser-chrome.zip manifest.json background.js content.js content.css popup.html popup.js icons/ --exclude '*.DS_Store'",
-    "build:firefox": "zip -r cookie-refuser-firefox.zip manifest.json background.js content.js content.css popup.html popup.js icons/ --exclude '*.DS_Store'",
+    "build:chrome": "node scripts/build.js chrome",
+    "build:firefox": "node scripts/build.js firefox",
     "build": "npm run build:chrome && npm run build:firefox"
   },
   "devDependencies": {
