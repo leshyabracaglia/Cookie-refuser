@@ -319,6 +319,30 @@ describe("Banner search (text-pattern fallback)", () => {
       expect(mock.runtime.sendMessage).not.toHaveBeenCalled();
     }
   );
+
+  test("does not click a deny-patterned link inside a banner container that navigates to a real page", async () => {
+    const mock = makeBrowserMock();
+    global.browser = mock;
+
+    const banner = document.createElement("div");
+    banner.id = "cookie-banner";
+    makeVisible(banner);
+
+    // e.g. a "Security" or "Settings" nav link that happens to sit inside a container
+    // matched as a "banner" (broad class-based selectors can over-match on real sites).
+    const link = document.createElement("a");
+    link.href = "/settings/security";
+    link.textContent = "Decline invitation";
+    makeVisible(link);
+    banner.appendChild(link);
+    document.body.appendChild(banner);
+    const clickSpy = jest.spyOn(link, "click");
+
+    await runScript(mock);
+
+    expect(clickSpy).not.toHaveBeenCalled();
+    expect(mock.runtime.sendMessage).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -417,6 +441,34 @@ describe("Broad search (scored fallback)", () => {
     await runScript(mock);
 
     expect(clickSpy).not.toHaveBeenCalled();
+  });
+
+  test("does not click a deny-patterned real navigation link even with strong cookie context (prevents unwanted page redirects)", async () => {
+    const mock = makeBrowserMock();
+    global.browser = mock;
+
+    // Mirrors a real-world false positive: an ordinary site footer with a "Manage
+    // cookies" control (mentions "cookie" in nearby text) that also happens to contain
+    // an unrelated link whose text matches a deny pattern, e.g. "Refuse" in a legal nav.
+    const footer = document.createElement("div");
+    footer.className = "site-footer";
+
+    const cookieNotice = document.createElement("p");
+    cookieNotice.textContent = "We use cookies. Manage your preferences below.";
+    footer.appendChild(cookieNotice);
+
+    const link = document.createElement("a");
+    link.href = "https://example.com/legal/refuse-service";
+    link.textContent = "Refuse service";
+    makeVisible(link);
+    footer.appendChild(link);
+    document.body.appendChild(footer);
+    const clickSpy = jest.spyOn(link, "click");
+
+    await runScript(mock);
+
+    expect(clickSpy).not.toHaveBeenCalled();
+    expect(mock.runtime.sendMessage).not.toHaveBeenCalled();
   });
 });
 

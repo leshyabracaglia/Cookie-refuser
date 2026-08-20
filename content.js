@@ -190,6 +190,16 @@
     return matchesAnyPattern(text, DENY_BUTTON_PATTERNS);
   }
 
+  // Real cookie-reject controls apply consent client-side and never carry a real
+  // destination href — they're buttons or JS-driven links. An <a> with a genuine href
+  // is almost certainly an unrelated site link that happens to match deny wording (e.g.
+  // "Security", "Settings"), and clicking it would navigate the user away entirely.
+  function isLikelyPageNavigation(el) {
+    if (el.tagName.toLowerCase() !== "a") return false;
+    const href = el.getAttribute("href");
+    return !!href && href !== "#" && !href.startsWith("javascript:");
+  }
+
   // Fallback context signal for tryBroadSearch(): sites using hashed/obfuscated CSS class
   // names (CSS Modules, styled-components) carry no "cookie"/"consent" substring in their
   // class/id attributes, but real banners almost always mention it in nearby visible text.
@@ -242,6 +252,7 @@
         );
 
         for (const el of clickables) {
+          if (isLikelyPageNavigation(el)) continue;
           const text = getVisibleText(el);
           if (text && matchesDenyPattern(text) && isVisible(el)) {
             el.click();
@@ -265,6 +276,7 @@
 
     for (const el of candidates) {
       if (!isVisible(el)) continue;
+      if (isLikelyPageNavigation(el)) continue;
       const text = getVisibleText(el);
       if (!text || !matchesDenyPattern(text)) continue;
 
@@ -341,12 +353,6 @@
       if (hasConfirmBtn) return el;
     }
     return null;
-  }
-
-  function isLikelyPageNavigation(el) {
-    if (el.tagName.toLowerCase() !== "a") return false;
-    const href = el.getAttribute("href");
-    return !!href && href !== "#" && !href.startsWith("javascript:");
   }
 
   function tryPreferencesPanel() {
